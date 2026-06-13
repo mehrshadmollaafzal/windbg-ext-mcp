@@ -238,7 +238,7 @@ class ErrorEnhancer:
         if "!process 0 0" in command:
             suggestions.append("Try 'analyze_process(action='list')' which handles large output better")
         elif "!handle" in command:
-            suggestions.append("Try limiting handle enumeration with specific process context")
+            suggestions.append("Use analyze_process(action='info', address='<eprocess>') for per-process enumeration instead")
         
         return EnhancedError(
             category=ErrorCategory.TIMEOUT,

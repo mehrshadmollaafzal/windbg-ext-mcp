@@ -59,7 +59,6 @@ class BatchCommandExecutor:
         performance_commands = [
             "!analyze -v",
             "!process 0 0",
-            "!handle 0 f", 
             "!vm",
             "!poolused"
         ]

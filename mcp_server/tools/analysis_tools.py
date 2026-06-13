@@ -5,17 +5,221 @@ This module contains tools for analyzing processes, threads, memory, and kernel 
 """
 import logging
 import re
-import time
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, Union
 from fastmcp import FastMCP, Context
 
 from core.communication import send_command, TimeoutError, CommunicationError
 from core.context import get_context_manager
-from core.error_handler import enhance_error, error_enhancer, DebugContext, ErrorCategory
+from core.error_handler import enhance_error, error_enhancer, DebugContext
 from core.hints import get_parameter_help, validate_tool_parameters
 from .tool_utilities import detect_kernel_mode
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_process_list(raw_output: str) -> list[dict[str, object]]:
+    processes: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    for line in raw_output.splitlines():
+        stripped = line.strip()
+        m = re.match(r'^PROCESS\s+([0-9a-fA-F`]+)', line)
+        if m:
+            if current:
+                processes.append(current)
+            current = {"eprocess": m.group(1).replace("`", "")}
+            continue
+        if current is None:
+            continue
+        m = re.search(r'SessionId:\s*(\d+)', stripped)
+        if m:
+            current["session_id"] = int(m.group(1))
+        m = re.search(r'Cid:\s*([0-9a-fA-F`]+)', stripped)
+        if m:
+            current["pid"] = int(m.group(1).replace("`", ""), 16)
+        m = re.search(r'Peb:\s*([0-9a-fA-F`]+)', stripped)
+        if m:
+            current["peb"] = m.group(1).replace("`", "")
+        m = re.search(r'ParentCid:\s*([0-9a-fA-F`]+)', stripped)
+        if m:
+            current["parent_pid"] = int(m.group(1).replace("`", ""), 16)
+        m = re.search(r'DirBase:\s*([0-9a-fA-F`]+)', stripped)
+        if m:
+            current["dirbase"] = m.group(1).replace("`", "")
+        m = re.search(r'ObjectTable:\s*([0-9a-fA-F`]+)', stripped)
+        if m:
+            current["object_table"] = m.group(1).replace("`", "")
+        m = re.search(r'HandleCount:\s*(\d+)', stripped)
+        if m:
+            current["handle_count"] = int(m.group(1))
+        m = re.search(r'Image:\s*(.+)', stripped)
+        if m:
+            current["image"] = m.group(1).strip()
+    if current:
+        processes.append(current)
+    return processes
+
+
+def _summarize_process(p: dict[str, object]) -> dict[str, object]:
+    return {
+        "eprocess": p.get("eprocess", ""),
+        "pid": p.get("pid", 0),
+        "image": p.get("image", ""),
+    }
+
+
+def _full_process(p: dict[str, object]) -> dict[str, object]:
+    return {
+        "EProcess": p.get("eprocess", ""),
+        "SessionId": p.get("session_id", 0),
+        "pid": p.get("pid", 0),
+        "peb": p.get("peb", ""),
+        "parent_pid": p.get("parent_pid", 0),
+        "DirBase": p.get("dirbase", ""),
+        "ObjectTable": p.get("object_table", ""),
+        "HandleCount": p.get("handle_count", 0),
+        "Image": p.get("image", ""),
+    }
+
+
+def _parse_thread_output(raw_output: str) -> dict[str, object] | None:
+    lines = raw_output.splitlines()
+    if not lines:
+        return None
+    thread_line = ""
+    for line in lines:
+        if line.strip().startswith("THREAD"):
+            thread_line = line
+            break
+    if not thread_line:
+        return None
+    thread: dict[str, object] = {}
+    header = re.match(
+        r'^THREAD\s+([0-9a-fA-F`]+)\s+Cid\s+([0-9a-fA-F`.]+)'
+        r'(?:\s+Teb:\s+([0-9a-fA-F`]+))?'
+        r'(?:\s+Win32Thread:\s+([0-9a-fA-F`]+))?'
+        r'(?:\s+(RUNNING|READY|WAITING|BLOCKED|TERMINATED|SUSPENDED|TRANSITION|DEFERRED)'
+        r'\s+on\s+processor\s+(\d+))?',
+        thread_line
+    )
+    if not header:
+        return None
+    thread["address"] = header.group(1).replace("`", "")
+    thread["cid"] = header.group(2)
+    if header.group(3):
+        thread["teb"] = header.group(3).replace("`", "")
+    if header.group(4):
+        thread["win32_thread"] = header.group(4).replace("`", "")
+    if header.group(5):
+        thread["state"] = header.group(5)
+    if header.group(6):
+        thread["processor"] = int(header.group(6))
+
+    irp_count = 0
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^\s+ffff', line) and 'Flags:' in line and 'Mdl:' in line:
+            irp_count += 1
+        m = re.search(r'Owning Process\s+([0-9a-fA-F`]+)\s+Image:\s+(.+)', stripped)
+        if m:
+            thread["process_address"] = m.group(1).replace("`", "")
+            thread["process_image"] = m.group(2).strip()
+        m = re.search(r'Attached Process\s+([0-9a-fA-F`]+)\s+Image:\s+(.+)', stripped)
+        if m:
+            attached_addr = m.group(1).strip()
+            thread["attached_process"] = attached_addr if attached_addr != "N/A" else None
+            attached_img = m.group(2).strip()
+            thread["attached_image"] = attached_img if attached_img != "N/A" else None
+        m = re.search(r'Wait Start TickCount\s+(\d+)\s+Ticks:\s+(\d+)', stripped)
+        if m:
+            thread["wait_start_tick"] = int(m.group(1))
+            thread["ticks"] = int(m.group(2))
+        m = re.search(r'Context Switch Count\s+(\d+)\s+IdealProcessor:\s+(\d+)', stripped)
+        if m:
+            thread["context_switches"] = int(m.group(1))
+            thread["ideal_processor"] = int(m.group(2))
+        m = re.search(r'UserTime\s+(\d+:\d+:\d+\.\d+)', stripped)
+        if m:
+            parts = m.group(1).split(":")
+            h, mi, s = int(parts[0]), int(parts[1]), float(parts[2])
+            thread["user_time_ms"] = int(h * 3600000 + mi * 60000 + s * 1000)
+        m = re.search(r'KernelTime\s+(\d+:\d+:\d+\.\d+)', stripped)
+        if m:
+            parts = m.group(1).split(":")
+            h, mi, s = int(parts[0]), int(parts[1]), float(parts[2])
+            thread["kernel_time_ms"] = int(h * 3600000 + mi * 60000 + s * 1000)
+        m = re.search(r'Priority\s+(\d+)\s+BasePriority\s+(\d+)'
+                      r'\s+Foreground Boost\s+(\d+)'
+                      r'\s+IoPriority\s+(\d+)'
+                      r'\s+PagePriority\s+(\d+)', stripped)
+        if m:
+            thread["priority"] = int(m.group(1))
+            thread["base_priority"] = int(m.group(2))
+            thread["foreground_boost"] = int(m.group(3))
+            thread["io_priority"] = int(m.group(4))
+            thread["page_priority"] = int(m.group(5))
+    thread["has_irp"] = irp_count > 0
+    thread["irp_count"] = irp_count
+
+    in_stack = False
+    stack_top: list[str] = []
+    for line in lines:
+        if line.strip().startswith("Child-SP"):
+            in_stack = True
+            continue
+        if in_stack:
+            m = re.match(r'^[0-9a-fA-F`]+\s+[0-9a-fA-F`]+\s+:\s+.+?:\s+(.+)', line)
+            if m:
+                name = m.group(1).strip()
+                name = re.sub(r'\+0x[0-9a-fA-F]+$', '', name)
+                if name not in stack_top:
+                    stack_top.append(name)
+            elif line.strip() == "":
+                break
+    thread["stack_top"] = stack_top[:5]
+
+    return thread
+
+
+def _summarize_thread(t: dict[str, object]) -> dict[str, object]:
+    result: dict[str, object] = {
+        "address": t.get("address", ""),
+        "cid": t.get("cid", ""),
+        "state": t.get("state", ""),
+    }
+    if t.get("process_address"):
+        result["process"] = {
+            "address": t["process_address"],
+            "image": t.get("process_image", ""),
+        }
+    cpu: dict[str, object] = {}
+    if t.get("processor") is not None:
+        cpu["processor"] = t["processor"]
+    if t.get("ideal_processor") is not None:
+        cpu["ideal_processor"] = t["ideal_processor"]
+    if cpu:
+        result["cpu"] = cpu
+    timing: dict[str, object] = {}
+    if t.get("wait_start_tick") is not None:
+        timing["wait_ticks"] = t["wait_start_tick"]
+    if t.get("user_time_ms") is not None:
+        timing["user_time_ms"] = t["user_time_ms"]
+    if t.get("kernel_time_ms") is not None:
+        timing["kernel_time_ms"] = t["kernel_time_ms"]
+    if timing:
+        result["timing"] = timing
+    result["priority"] = {
+        "base": t.get("base_priority", 0),
+        "current": t.get("priority", 0),
+        "foreground_boost": t.get("foreground_boost", 0),
+    }
+    result["io"] = {
+        "has_irp": t.get("has_irp", False),
+        "irp_count": t.get("irp_count", 0),
+    }
+    if t.get("stack_top"):
+        result["stack_top"] = t["stack_top"]
+    return result
+
 
 def _get_timeout(command: str) -> int:
     """Helper function to get timeout for commands using unified system."""
@@ -28,7 +232,7 @@ def register_analysis_tools(mcp: FastMCP):
     """Register all analysis tools."""
     
     @mcp.tool()
-    async def analyze_process(ctx: Context, action: str, address: str = "", save_context: bool = True) -> Union[str, Dict[str, Any]]:
+    async def analyze_process(ctx: Context, action: str, address: str = "", save_context: bool = True, verbosity: str = "summary") -> Union[str, Dict[str, Any]]:
         """
         Analyze processes in the debugging session.
         
@@ -37,6 +241,7 @@ def register_analysis_tools(mcp: FastMCP):
             action: Action to perform - "list", "switch", "info", "peb", "restore"
             address: Process address (required for "switch", "info", "peb")
             save_context: Whether to save current context before switching (default: True)
+            verbosity: Output detail level for "list" action - "summary" (eprocess, pid, image) or "full" (all fields) (default: "summary")
             
         Returns:
             Process analysis results
@@ -75,20 +280,18 @@ def register_analysis_tools(mcp: FastMCP):
             context_mgr = get_context_manager()
             
             if action == "list":
-                # List all processes
                 try:
-                    result = send_command("!process 0 0", timeout_ms=_get_timeout("!process 0 0"))
-                    
+                    raw = send_command("!process 0 0", timeout_ms=_get_timeout("!process 0 0"))
+                    parsed = _parse_process_list(raw)
+                    if verbosity == "full":
+                        processes = [_full_process(p) for p in parsed]
+                    else:
+                        processes = [_summarize_process(p) for p in parsed]
                     return {
-                        "output": result,
-                        "next_steps": [
-                            "Copy process address from output for other actions",
-                            "Use analyze_process(action='info', address='...') for details", 
-                            "Switch context with analyze_process(action='switch', address='...')"
-                        ],
-                        "tip": "Copy a process address from the output above to use with other actions"
+                        "processes": processes,
+                        "count": len(processes),
+                        "verbosity": verbosity,
                     }
-                    
                 except (CommunicationError, TimeoutError) as e:
                     enhanced_error = enhance_error("timeout", command="!process 0 0", timeout_ms=_get_timeout("!process 0 0"))
                     return enhanced_error.to_dict()
@@ -198,7 +401,7 @@ def register_analysis_tools(mcp: FastMCP):
             return enhanced_error.to_dict()
 
     @mcp.tool()
-    async def analyze_thread(ctx: Context, action: str, address: str = "", count: int = 20) -> Union[str, Dict[str, Any]]:
+    async def analyze_thread(ctx: Context, action: str, address: str = "", count: int = 20, verbosity: str = "raw") -> Union[str, Dict[str, Any]]:
         """
         Analyze threads in the debugging session.
         
@@ -207,6 +410,7 @@ def register_analysis_tools(mcp: FastMCP):
             action: Action to perform - "list", "switch", "info", "stack", "all_stacks", "teb"
             address: Thread address (required for "switch", "info", "stack", "teb")
             count: Number of stack frames or threads to show (default: 20)
+            verbosity: Output format for "list" action - "raw" (original WinDbg output) or "summary" (structured JSON) (default: "raw")
             
         Returns:
             Thread analysis results
@@ -217,10 +421,14 @@ def register_analysis_tools(mcp: FastMCP):
             context_mgr = get_context_manager()
             
             if action == "list":
-                # List all threads
                 try:
-                    result = send_command("!thread", timeout_ms=_get_timeout("!thread"))
-                    return {"output": result, "note": "Copy thread address for detailed analysis"}
+                    raw = send_command("!thread", timeout_ms=_get_timeout("!thread"))
+                    if verbosity == "summary":
+                        parsed = _parse_thread_output(raw)
+                        if parsed:
+                            return {"thread": _summarize_thread(parsed), "format": "summary"}
+                        return {"error": "Failed to parse thread output", "raw": raw}
+                    return {"output": raw, "note": "Copy thread address for detailed analysis"}
                 except Exception as e:
                     enhanced_error = enhance_error("execution", command="!thread", original_error=str(e))
                     return enhanced_error.to_dict()
@@ -433,7 +641,7 @@ def register_analysis_tools(mcp: FastMCP):
         
         Args:
             ctx: The MCP context
-            action: Action to perform - "object", "idt", "handles", "interrupts", "modules"
+            action: Action to perform - "object", "idt", "interrupts", "modules"
             address: Object address (required for "object", "interrupts")
             
         Returns:
@@ -460,14 +668,6 @@ def register_analysis_tools(mcp: FastMCP):
                     return {"output": result, "context": "Interrupt Descriptor Table"}
                 except Exception as e:
                     enhanced_error = enhance_error("execution", command="!idt", original_error=str(e))
-                    return enhanced_error.to_dict()
-                    
-            elif action == "handles":
-                try:
-                    result = send_command("!handle", timeout_ms=_get_timeout("!handle"))
-                    return {"output": result, "context": "System handles"}
-                except Exception as e:
-                    enhanced_error = enhance_error("execution", command="!handle", original_error=str(e))
                     return enhanced_error.to_dict()
                     
             elif action == "interrupts":
@@ -497,7 +697,7 @@ def register_analysis_tools(mcp: FastMCP):
             else:
                 return {
                     "error": f"Unknown action: {action}",
-                    "available_actions": ["object", "idt", "handles", "interrupts", "modules"],
+                    "available_actions": ["object", "idt", "interrupts", "modules"],
                     "examples": [
                         "analyze_kernel(action='idt')",
                         "analyze_kernel(action='object', address='0xffffffff80000000')"
