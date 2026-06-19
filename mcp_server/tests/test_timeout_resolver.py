@@ -26,6 +26,6 @@ def test_streaming_and_bulk():
 def test_execution_and_memory():
     r = TimeoutResolver()
     assert r.get_category("g") == TimeoutCategory.EXECUTION
+    assert r.get_category(".breakin") == TimeoutCategory.EXECUTION
     assert r.get_category("bp nt!NtCreateFile") == TimeoutCategory.EXECUTION
     assert r.get_category("dd 0x1000") == TimeoutCategory.MEMORY
-

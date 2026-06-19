@@ -92,6 +92,46 @@ def get_tool_definitions() -> Dict[str, ToolInfo]:
             "Consider using specialized tools (analyze_*) for better error handling"
         ]
     )
+
+    tools["runtime_control"] = ToolInfo(
+        name="runtime_control",
+        description="Detect, continue, and interrupt debugger runtime state without normal command execution",
+        actions={
+            "status": ActionInfo(
+                name="status",
+                description="Report whether the target is running or the debugger is broken in",
+                parameters=[],
+                examples=["runtime_control(action='status')"]
+            ),
+            "continue": ActionInfo(
+                name="continue",
+                description="Continue target execution through DbgEng SetExecutionStatus",
+                parameters=[],
+                examples=["runtime_control(action='continue')"]
+            ),
+            "break": ActionInfo(
+                name="break",
+                description="Interrupt a running target through DbgEng SetInterrupt and wait for break-in",
+                parameters=[
+                    ParameterInfo(
+                        name="wait_ms",
+                        type="integer",
+                        required=False,
+                        description="Maximum time to wait for the target to break in",
+                        examples=["wait_ms=15000", "wait_ms=30000"],
+                        default_value=15000
+                    )
+                ],
+                examples=["runtime_control(action='break', wait_ms=15000)"]
+            )
+        },
+        common_workflows=[
+            "Use runtime_control(action='status') before normal commands if the target may be running",
+            "Use runtime_control(action='continue') to run the target",
+            "Use runtime_control(action='break') to regain debugger control after continue",
+            "Avoid repeated .breakin through run_command while a kernel target is running"
+        ]
+    )
     
     # analyze_process tool
     tools["analyze_process"] = ToolInfo(
@@ -418,4 +458,4 @@ def get_tool_definitions() -> Dict[str, ToolInfo]:
         ]
     )
     
-    return tools 
+    return tools

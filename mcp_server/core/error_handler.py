@@ -223,7 +223,7 @@ class ErrorEnhancer:
             ]
             next_steps = [
                 "1. Check if the target VM is responsive",
-                "2. Try breaking into the debugger if target seems hung",
+                "2. Use runtime_control(action='break') if the target is running or seems hung",
                 "3. Use more specific commands to reduce data volume",
                 "4. Consider increasing timeout for large operations"
             ]
@@ -231,7 +231,7 @@ class ErrorEnhancer:
             suggestions = [
                 f"Command timed out after {timeout_ms}ms",
                 "The debuggee process might be busy or unresponsive",
-                "Try breaking into the debugger first"
+                "Use runtime_control(action='break') before retrying inspection commands"
             ]
         
         # Suggest alternatives for specific commands
@@ -426,4 +426,4 @@ def enhance_error(error_type: str, **kwargs) -> EnhancedError:
             category=ErrorCategory.WORKFLOW,
             message=kwargs.get("message", "Unknown error"),
             debug_context=error_enhancer.current_context
-        ) 
+        )

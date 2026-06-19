@@ -12,6 +12,7 @@ void EnhancedCommandHandlers::RegisterHandlers(MCPServer& server) {
     server.RegisterHandler("execute_command_enhanced", ExecuteCommandEnhancedHandler);
     server.RegisterHandler("execute_command_streaming", ExecuteCommandStreamingHandler);
     server.RegisterHandler("for_each_module", ForEachModuleHandler);
+    server.RegisterHandler("runtime_control", RuntimeControlHandler);
     
 
     
@@ -53,6 +54,72 @@ json EnhancedCommandHandlers::ExecuteCommandHandler(const json& message) {
         };
         
         std::string normalizedCmd = normalizeCommand(command);
+
+        // Exact continue commands must not use IDebugControl::Execute. In a
+        // kernel session they can leave the MCP request waiting for the next
+        // debug event, which prevents reliable break-in over the command path.
+        if (normalizedCmd == "g" || normalizedCmd == "gh" || normalizedCmd == "gn") {
+            ULONG goStatus = DEBUG_STATUS_GO;
+            if (normalizedCmd == "gh") {
+                goStatus = DEBUG_STATUS_GO_HANDLED;
+            } else if (normalizedCmd == "gn") {
+                goStatus = DEBUG_STATUS_GO_NOT_HANDLED;
+            }
+
+            json runtimeResult = CommandUtilities::ContinueExecution(goStatus);
+            if (runtimeResult.value("status", "") == "success") {
+                auto end_time = std::chrono::steady_clock::now();
+                double execution_time = std::chrono::duration<double>(end_time - start_time).count();
+                CommandUtilities::UpdateGlobalPerformanceMetrics(execution_time);
+
+                json response = CommandUtilities::CreateSuccessResponseWithMetadata(
+                    message.value("id", 0),
+                    command,
+                    runtimeResult.value("output", "Target execution continued."),
+                    execution_time
+                );
+                response["runtime_state"] = runtimeResult;
+                response["guidance"] = "Target is running. Use runtime_control(action='break') to interrupt it; do not loop .breakin through run_command.";
+                return response;
+            }
+
+            return CommandUtilities::CreateDetailedErrorResponse(
+                message.value("id", 0),
+                "execute_command",
+                runtimeResult.value("error", "Failed to continue target."),
+                ErrorCategory::ExecutionContext,
+                static_cast<HRESULT>(runtimeResult.value("error_code", 0u)),
+                "Check runtime_control(action='status'), then retry continue only when the debugger is broken in."
+            );
+        }
+
+        if (normalizedCmd == ".breakin") {
+            json runtimeResult = CommandUtilities::BreakIn(timeout);
+            if (runtimeResult.value("status", "") == "success") {
+                auto end_time = std::chrono::steady_clock::now();
+                double execution_time = std::chrono::duration<double>(end_time - start_time).count();
+                CommandUtilities::UpdateGlobalPerformanceMetrics(execution_time);
+
+                json response = CommandUtilities::CreateSuccessResponseWithMetadata(
+                    message.value("id", 0),
+                    command,
+                    runtimeResult.value("output", "Debugger interrupt completed; target is broken in."),
+                    execution_time
+                );
+                response["runtime_state"] = runtimeResult;
+                response["guidance"] = "Compatibility path used. Prefer runtime_control(action='break') for kernel break-in.";
+                return response;
+            }
+
+            return CommandUtilities::CreateDetailedErrorResponse(
+                message.value("id", 0),
+                "execute_command",
+                runtimeResult.value("error", "Failed to break into target."),
+                ErrorCategory::ExecutionContext,
+                static_cast<HRESULT>(runtimeResult.value("error_code", 0u)),
+                "Use runtime_control(action='break', wait_ms=15000) to interrupt a running kernel target."
+            );
+        }
         
         // Special handling for specific commands that need custom processing
         if (normalizedCmd.find("!process") == 0) {
@@ -197,6 +264,76 @@ json EnhancedCommandHandlers::ExecuteCommandHandler(const json& message) {
             message.value("id", 0),
             "execute_command",
             std::string("Command failed: ") + e.what(),
+            ErrorCategory::InternalError
+        );
+    }
+}
+
+json EnhancedCommandHandlers::RuntimeControlHandler(const json& message) {
+    try {
+        auto args = message.value("args", json::object());
+        std::string action = args.value("action", "status");
+        unsigned int waitMs = args.value("wait_ms", 15000u);
+
+        std::transform(action.begin(), action.end(), action.begin(), ::tolower);
+
+        json result;
+        if (action == "status") {
+            result = CommandUtilities::GetRuntimeStatus();
+            result["output"] = result.value("execution_status", "unknown");
+        }
+        else if (action == "continue" || action == "go") {
+            result = CommandUtilities::ContinueExecution(DEBUG_STATUS_GO);
+        }
+        else if (action == "break" || action == "breakin" || action == "interrupt") {
+            result = CommandUtilities::BreakIn(waitMs);
+        }
+        else {
+            return CommandUtilities::CreateDetailedErrorResponse(
+                message.value("id", 0),
+                "runtime_control",
+                "Unknown runtime control action: " + action,
+                ErrorCategory::CommandSyntax,
+                E_INVALIDARG,
+                "Use action='status', action='continue', or action='break'."
+            );
+        }
+
+        if (result.value("status", "") == "success") {
+            json response = {
+                {"type", "response"},
+                {"id", message.value("id", 0)},
+                {"status", "success"},
+                {"command", "runtime_control"},
+                {"action", action},
+                {"output", result.value("output", result.value("execution_status", ""))},
+                {"runtime_state", result},
+                {"timestamp", CommandUtilities::GetCurrentTimestamp()}
+            };
+
+            if (action == "continue" || action == "go") {
+                response["guidance"] = "Target is running. Use runtime_control(action='break') to regain debugger control.";
+            } else if (action == "break" || action == "breakin" || action == "interrupt") {
+                response["guidance"] = "Debugger is broken in. Normal run_command calls are safe again.";
+            }
+
+            return response;
+        }
+
+        return CommandUtilities::CreateDetailedErrorResponse(
+            message.value("id", 0),
+            "runtime_control",
+            result.value("error", "Runtime control action failed."),
+            ErrorCategory::ExecutionContext,
+            static_cast<HRESULT>(result.value("error_code", 0u)),
+            "Use runtime_control(action='status') to inspect execution state. If the target is running, use runtime_control(action='break') rather than .breakin through run_command."
+        );
+    }
+    catch (const std::exception& e) {
+        return CommandUtilities::CreateDetailedErrorResponse(
+            message.value("id", 0),
+            "runtime_control",
+            std::string("Runtime control failed: ") + e.what(),
             ErrorCategory::InternalError
         );
     }
@@ -658,4 +795,3 @@ json EnhancedCommandHandlers::HandleAddressCommand(int id, const std::string& co
     }
 }
 
- 

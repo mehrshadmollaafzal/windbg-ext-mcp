@@ -155,7 +155,7 @@ def is_app_installed(app_info):
 
 def get_windbg_mcp_config():
     """Return the configuration for the windbg-mcp server."""
-    # Current tools from our modular architecture (16 tools total)
+    # Current tools from our modular architecture (17 tools total)
     tools_list = [
         # Session management tools
         "debug_session",
@@ -163,6 +163,7 @@ def get_windbg_mcp_config():
         "session_manager",
         
         # Command execution tools
+        "runtime_control",
         "run_command",
         "run_sequence",
         "breakpoint_and_continue",

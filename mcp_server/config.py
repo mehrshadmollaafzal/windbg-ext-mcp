@@ -136,7 +136,7 @@ QUICK_COMMANDS = {"version", "help", "?", "r"}
 NORMAL_COMMANDS = {"lm", "k", "dv", "dt"}
 ANALYSIS_COMMANDS = {"!analyze", "!thread", "!process"}
 MEMORY_COMMANDS = {"dd", "dq", "dp", "da", "du"}
-EXECUTION_COMMANDS = {"g", "p", "t", "bp", "bc"}
+EXECUTION_COMMANDS = {"g", "gh", "gn", "p", "t", "bp", "bc", ".breakin"}
 
 # Large operation commands that need extended timeouts
 BULK_COMMANDS = {"lm", "!dlls", "!handle", "!vm", "!address"}
@@ -270,4 +270,4 @@ def load_environment_config():
     if DEBUG_ENABLED:
         LOG_LEVEL = "DEBUG"
     elif VERBOSE_LOGGING:
-        LOG_LEVEL = "INFO" 
+        LOG_LEVEL = "INFO"

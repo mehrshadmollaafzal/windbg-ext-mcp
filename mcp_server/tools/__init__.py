@@ -22,7 +22,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     
     This function orchestrates the registration of all tool categories:
     - Session management tools (debug_session, connection_manager, session_manager)
-    - Command execution tools (run_command, run_sequence)
+    - Command execution tools (runtime_control, run_command, run_sequence)
     - Analysis tools (analyze_process, analyze_thread, analyze_memory, analyze_kernel)
     - Performance tools (performance_manager, async_manager)
     - Support tools (troubleshoot, get_help)
@@ -68,8 +68,8 @@ TOOL_CATEGORIES = {
         "description": "Tools for managing debugging sessions, connections, and session recovery"
     },
     "command_execution": {
-        "tools": ["run_command", "run_sequence", "breakpoint_and_continue"],
-        "description": "Tools for executing WinDbg commands with validation and error handling"
+        "tools": ["runtime_control", "run_command", "run_sequence", "breakpoint_and_continue"],
+        "description": "Tools for debugger runtime control and WinDbg command execution"
     },
     "analysis": {
         "tools": ["analyze_process", "analyze_thread", "analyze_memory", "analyze_kernel"],
@@ -97,4 +97,4 @@ def get_tool_info() -> dict:
         "categories": TOOL_CATEGORIES,
         "total_tools": sum(len(cat["tools"]) for cat in TOOL_CATEGORIES.values()),
         "architecture": "Modular tool organization with separate registration functions"
-    } 
+    }

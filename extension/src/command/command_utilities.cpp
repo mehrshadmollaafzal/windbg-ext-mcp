@@ -21,6 +21,77 @@ std::chrono::steady_clock::time_point CommandUtilities::g_lastCommandTime = std:
 std::string CommandUtilities::g_sessionId;
 double CommandUtilities::g_lastExecutionTime = 0.0;
 
+namespace {
+    std::string DebugStatusToString(ULONG status) {
+        switch (status) {
+            case DEBUG_STATUS_NO_DEBUGGEE: return "no_debuggee";
+            case DEBUG_STATUS_BREAK: return "broken";
+            case DEBUG_STATUS_GO: return "running";
+            case DEBUG_STATUS_GO_HANDLED: return "running_handled";
+            case DEBUG_STATUS_GO_NOT_HANDLED: return "running_not_handled";
+            case DEBUG_STATUS_STEP_OVER: return "step_over";
+            case DEBUG_STATUS_STEP_INTO: return "step_into";
+            case DEBUG_STATUS_STEP_BRANCH: return "step_branch";
+            case DEBUG_STATUS_IGNORE_EVENT: return "ignore_event";
+            case DEBUG_STATUS_RESTART_REQUESTED: return "restart_requested";
+            case DEBUG_STATUS_REVERSE_GO: return "reverse_running";
+            case DEBUG_STATUS_REVERSE_STEP_BRANCH: return "reverse_step_branch";
+            case DEBUG_STATUS_REVERSE_STEP_OVER: return "reverse_step_over";
+            case DEBUG_STATUS_REVERSE_STEP_INTO: return "reverse_step_into";
+            case DEBUG_STATUS_OUT_OF_SYNC: return "out_of_sync";
+            case DEBUG_STATUS_WAIT_INPUT: return "wait_input";
+            case DEBUG_STATUS_TIMEOUT: return "timeout";
+            default: return "unknown";
+        }
+    }
+
+    bool IsRunningStatus(ULONG status) {
+        switch (status) {
+            case DEBUG_STATUS_GO:
+            case DEBUG_STATUS_GO_HANDLED:
+            case DEBUG_STATUS_GO_NOT_HANDLED:
+            case DEBUG_STATUS_STEP_OVER:
+            case DEBUG_STATUS_STEP_INTO:
+            case DEBUG_STATUS_STEP_BRANCH:
+            case DEBUG_STATUS_REVERSE_GO:
+            case DEBUG_STATUS_REVERSE_STEP_BRANCH:
+            case DEBUG_STATUS_REVERSE_STEP_OVER:
+            case DEBUG_STATUS_REVERSE_STEP_INTO:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool IsBrokenStatus(ULONG status) {
+        return status == DEBUG_STATUS_BREAK;
+    }
+
+    json MakeRuntimeState(ULONG status) {
+        return {
+            {"execution_status", DebugStatusToString(status)},
+            {"execution_status_code", status},
+            {"is_running", IsRunningStatus(status)},
+            {"is_broken", IsBrokenStatus(status)},
+            {"can_execute_commands", IsBrokenStatus(status)}
+        };
+    }
+
+    HRESULT CreateDebugControl(CComPtr<IDebugClient>& client, CComQIPtr<IDebugControl>& control) {
+        HRESULT hr = DebugCreate(__uuidof(IDebugClient), (void**)&client);
+        if (FAILED(hr)) {
+            return hr;
+        }
+
+        control = client;
+        if (!control) {
+            return E_NOINTERFACE;
+        }
+
+        return S_OK;
+    }
+}
+
 // CommandExecutor class implementation
 class CommandExecutor {
 public:
@@ -38,33 +109,37 @@ public:
         CommandResult result;
         
         // Create a promise/future for the command execution
-        std::promise<CommandResult> promise;
-        auto future = promise.get_future();
+        auto promise = std::make_shared<std::promise<CommandResult>>();
+        auto future = promise->get_future();
         
         // Shared pointer to control interface for interrupt capability
         std::shared_ptr<CComQIPtr<IDebugControl>> sharedControl = std::make_shared<CComQIPtr<IDebugControl>>();
+        auto sharedControlMutex = std::make_shared<std::mutex>();
         
         // Launch the command execution in a separate thread
-        std::thread executionThread([&promise, command, sharedControl]() {
+        std::thread executionThread([promise, command, sharedControl, sharedControlMutex]() {
             bool promiseSet = false;
             try {
                 CComPtr<IDebugClient> client;
                 HRESULT hr = DebugCreate(__uuidof(IDebugClient), (void**)&client);
                 if (FAILED(hr)) {
-                    promise.set_value(CommandResult("Failed to create debug client", hr));
+                    promise->set_value(CommandResult("Failed to create debug client", hr));
                     promiseSet = true;
                     return;
                 }
                 
                 CComQIPtr<IDebugControl> control(client);
                 if (!control) {
-                    promise.set_value(CommandResult("Failed to get debug control interface", E_FAIL));
+                    promise->set_value(CommandResult("Failed to get debug control interface", E_FAIL));
                     promiseSet = true;
                     return;
                 }
                 
                 // Store the control interface for potential interrupt
-                *sharedControl = control;
+                {
+                    std::lock_guard<std::mutex> lock(*sharedControlMutex);
+                    *sharedControl = control;
+                }
                 
                 // Create our custom output callback - use CComPtr for proper management
                 CComPtr<OutputCallbacks> callbacks;
@@ -73,7 +148,7 @@ public:
                 // Set the output callbacks
                 hr = client->SetOutputCallbacks(callbacks);
                 if (FAILED(hr)) {
-                    promise.set_value(CommandResult("Failed to set output callbacks", hr));
+                    promise->set_value(CommandResult("Failed to set output callbacks", hr));
                     promiseSet = true;
                     return;
                 }
@@ -87,24 +162,24 @@ public:
                 // Clean up by removing our callback
                 client->SetOutputCallbacks(nullptr);
                 
-                promise.set_value(CommandResult(output, hr));
+                promise->set_value(CommandResult(output, hr));
                 promiseSet = true;
                 
             } catch (const std::exception& e) {
                 if (!promiseSet) {
-                    promise.set_value(CommandResult(std::string("Exception: ") + e.what(), E_FAIL));
+                    promise->set_value(CommandResult(std::string("Exception: ") + e.what(), E_FAIL));
                     promiseSet = true;
                 }
             } catch (...) {
                 if (!promiseSet) {
-                    promise.set_value(CommandResult("Unknown exception", E_FAIL));
+                    promise->set_value(CommandResult("Unknown exception", E_FAIL));
                     promiseSet = true;
                 }
             }
             
             // Final safety net - ensure promise is always set
             if (!promiseSet) {
-                promise.set_value(CommandResult("Internal error: Promise not set", E_FAIL));
+                promise->set_value(CommandResult("Internal error: Promise not set", E_FAIL));
             }
         });
         
@@ -117,8 +192,11 @@ public:
             result.hr = E_ABORT;
             
             // Try to interrupt the command gracefully using SetInterrupt
-            if (*sharedControl) {
-                (*sharedControl)->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+            {
+                std::lock_guard<std::mutex> lock(*sharedControlMutex);
+                if (*sharedControl) {
+                    (*sharedControl)->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+                }
             }
             
             // Give the command a brief opportunity to respond to the interrupt
@@ -160,6 +238,37 @@ std::string CommandUtilities::ExecuteWinDbgCommand(const std::string& command, u
     if (command.empty()) {
         throw std::invalid_argument("Command cannot be empty");
     }
+
+    std::string normalizedCommand = command;
+    normalizedCommand.erase(0, normalizedCommand.find_first_not_of(" \t\n\r\f\v"));
+    normalizedCommand.erase(normalizedCommand.find_last_not_of(" \t\n\r\f\v") + 1);
+    std::transform(normalizedCommand.begin(), normalizedCommand.end(), normalizedCommand.begin(),
+        [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+
+    if (normalizedCommand == "g" || normalizedCommand == "gh" || normalizedCommand == "gn") {
+        ULONG goStatus = DEBUG_STATUS_GO;
+        if (normalizedCommand == "gh") {
+            goStatus = DEBUG_STATUS_GO_HANDLED;
+        } else if (normalizedCommand == "gn") {
+            goStatus = DEBUG_STATUS_GO_NOT_HANDLED;
+        }
+
+        json runtimeResult = ContinueExecution(goStatus);
+        if (runtimeResult.value("status", "") == "success") {
+            return runtimeResult.value("output", "Target execution continued.");
+        }
+
+        throw std::runtime_error(runtimeResult.value("error", "Failed to continue target."));
+    }
+
+    if (normalizedCommand == ".breakin") {
+        json runtimeResult = BreakIn(timeoutMs);
+        if (runtimeResult.value("status", "") == "success") {
+            return runtimeResult.value("output", "Debugger interrupt completed; target is broken in.");
+        }
+
+        throw std::runtime_error(runtimeResult.value("error", "Failed to break into target."));
+    }
     
     try {
         auto result = CommandExecutor::ExecuteWithTimeout(command, timeoutMs);
@@ -182,6 +291,174 @@ std::string CommandUtilities::ExecuteWinDbgCommand(const std::string& command, u
     catch (const std::exception& e) {
         throw std::runtime_error(std::string("Command execution failed: ") + e.what());
     }
+}
+
+json CommandUtilities::GetRuntimeStatus() {
+    CComPtr<IDebugClient> client;
+    CComQIPtr<IDebugControl> control;
+    HRESULT hr = CreateDebugControl(client, control);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to create debug control interface"},
+            {"error_code", static_cast<unsigned int>(hr)}
+        };
+    }
+
+    ULONG executionStatus = DEBUG_STATUS_NO_DEBUGGEE;
+    hr = control->GetExecutionStatus(&executionStatus);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to query debugger execution status"},
+            {"error_code", static_cast<unsigned int>(hr)}
+        };
+    }
+
+    json state = MakeRuntimeState(executionStatus);
+    state["status"] = "success";
+    state["timestamp"] = GetCurrentTimestamp();
+    return state;
+}
+
+json CommandUtilities::ContinueExecution(ULONG status) {
+    CComPtr<IDebugClient> client;
+    CComQIPtr<IDebugControl> control;
+    HRESULT hr = CreateDebugControl(client, control);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to create debug control interface"},
+            {"error_code", static_cast<unsigned int>(hr)}
+        };
+    }
+
+    ULONG beforeStatus = DEBUG_STATUS_NO_DEBUGGEE;
+    hr = control->GetExecutionStatus(&beforeStatus);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to query debugger execution status before continuing"},
+            {"error_code", static_cast<unsigned int>(hr)}
+        };
+    }
+
+    if (IsRunningStatus(beforeStatus)) {
+        json state = MakeRuntimeState(beforeStatus);
+        state["status"] = "success";
+        state["output"] = "Target is already running.";
+        state["timestamp"] = GetCurrentTimestamp();
+        return state;
+    }
+
+    hr = control->SetExecutionStatus(status);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to continue target with SetExecutionStatus"},
+            {"error_code", static_cast<unsigned int>(hr)},
+            {"previous_state", MakeRuntimeState(beforeStatus)}
+        };
+    }
+
+    ULONG afterStatus = status;
+    HRESULT statusHr = control->GetExecutionStatus(&afterStatus);
+    json state = MakeRuntimeState(SUCCEEDED(statusHr) ? afterStatus : status);
+    state["status"] = "success";
+    state["output"] = "Target execution continued.";
+    state["previous_state"] = MakeRuntimeState(beforeStatus);
+    state["timestamp"] = GetCurrentTimestamp();
+    return state;
+}
+
+json CommandUtilities::BreakIn(unsigned int waitMs) {
+    CComPtr<IDebugClient> client;
+    CComQIPtr<IDebugControl> control;
+    HRESULT hr = CreateDebugControl(client, control);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to create debug control interface"},
+            {"error_code", static_cast<unsigned int>(hr)}
+        };
+    }
+
+    ULONG initialStatus = DEBUG_STATUS_NO_DEBUGGEE;
+    hr = control->GetExecutionStatus(&initialStatus);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to query debugger execution status before break-in"},
+            {"error_code", static_cast<unsigned int>(hr)}
+        };
+    }
+
+    if (IsBrokenStatus(initialStatus)) {
+        json state = MakeRuntimeState(initialStatus);
+        state["status"] = "success";
+        state["output"] = "Debugger is already broken in.";
+        state["interrupt_sent"] = false;
+        state["timestamp"] = GetCurrentTimestamp();
+        return state;
+    }
+
+    hr = control->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+    if (FAILED(hr)) {
+        return {
+            {"status", "error"},
+            {"error", "Failed to request debugger interrupt with SetInterrupt"},
+            {"error_code", static_cast<unsigned int>(hr)},
+            {"initial_state", MakeRuntimeState(initialStatus)}
+        };
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(waitMs);
+    ULONG currentStatus = initialStatus;
+    HRESULT waitHr = S_OK;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        hr = control->GetExecutionStatus(&currentStatus);
+        if (SUCCEEDED(hr) && IsBrokenStatus(currentStatus)) {
+            json state = MakeRuntimeState(currentStatus);
+            state["status"] = "success";
+            state["output"] = "Debugger interrupt completed; target is broken in.";
+            state["interrupt_sent"] = true;
+            state["initial_state"] = MakeRuntimeState(initialStatus);
+            state["timestamp"] = GetCurrentTimestamp();
+            return state;
+        }
+
+        auto remainingMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remainingMs <= 0) {
+            break;
+        }
+
+        ULONG waitSlice = static_cast<ULONG>(std::min<long long>(250, remainingMs));
+        waitHr = control->WaitForEvent(0, waitSlice);
+        if (SUCCEEDED(waitHr)) {
+            hr = control->GetExecutionStatus(&currentStatus);
+            if (SUCCEEDED(hr) && IsBrokenStatus(currentStatus)) {
+                json state = MakeRuntimeState(currentStatus);
+                state["status"] = "success";
+                state["output"] = "Debugger interrupt completed; target is broken in.";
+                state["interrupt_sent"] = true;
+                state["initial_state"] = MakeRuntimeState(initialStatus);
+                state["timestamp"] = GetCurrentTimestamp();
+                return state;
+            }
+        }
+    }
+
+    json state = MakeRuntimeState(currentStatus);
+    state["status"] = "error";
+    state["error"] = "Timed out waiting for target to break after SetInterrupt.";
+    state["error_code"] = static_cast<unsigned int>(waitHr);
+    state["interrupt_sent"] = true;
+    state["initial_state"] = MakeRuntimeState(initialStatus);
+    state["timeout_ms"] = waitMs;
+    state["timestamp"] = GetCurrentTimestamp();
+    return state;
 }
 
 json CommandUtilities::CreateSuccessResponse(int id, const std::string& command, const std::string& output) {
@@ -561,4 +838,4 @@ void CommandUtilities::EnsureSessionId() {
     if (g_sessionId.empty()) {
         g_sessionId = GenerateSessionId();
     }
-} 
+}

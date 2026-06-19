@@ -57,6 +57,13 @@ public:
      */
     static json ForEachModuleHandler(const json& message);
 
+    /**
+     * @brief Handle debugger runtime control requests without normal command execution.
+     * @param message The incoming JSON message.
+     * @return JSON response with runtime state/control result.
+     */
+    static json RuntimeControlHandler(const json& message);
+
 
 
     /**
@@ -95,4 +102,4 @@ public:
 
 private:
     // Private helper methods can be added here in the future
-}; 
+};

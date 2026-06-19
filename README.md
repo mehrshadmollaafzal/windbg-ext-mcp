@@ -71,6 +71,7 @@ Note: These are for lawful, defensive research in controlled test labs only.
 - debug_session: session status and metadata
 - connection_manager: connection health and resilience controls
 - session_manager: capture/restore debugging context
+- runtime_control: detect running/broken state, continue execution, and break into a running target
 - run_command: execute a WinDbg command with validation/timeout handling
 - run_sequence: execute multiple commands in order
 - breakpoint_and_continue: set a breakpoint and continue execution
@@ -84,6 +85,20 @@ Note: These are for lawful, defensive research in controlled test labs only.
 - get_help: list tools and usage tips
 - test_windbg_communication: pipe connectivity test
 - network_debugging_troubleshoot: network debugging issue checks
+
+## Runtime Control
+
+Kernel targets need runtime control through the debugger engine, not repeated normal command execution while the target is running.
+
+Recommended flow:
+```text
+runtime_control(action="status")
+runtime_control(action="continue")
+runtime_control(action="status")
+runtime_control(action="break", wait_ms=15000)
+```
+
+After `runtime_control(action="continue")` or a bare `g`, the target is running and most inspection commands cannot complete until WinDbg is broken in again. Use `runtime_control(action="break")`; it calls the extension's DbgEng interrupt path and waits for `DEBUG_STATUS_BREAK`. Avoid looping `.breakin` through `run_command` as a recovery strategy for a running kernel target.
 
 ## What’s Here
 - `extension/`: C++ WinDbg extension. Named pipe `\\.\pipe\windbgmcp`. Exports: `help`, `objecttypes`, `hello`, `mcpstart`, `mcpstop`, `mcpstatus`.

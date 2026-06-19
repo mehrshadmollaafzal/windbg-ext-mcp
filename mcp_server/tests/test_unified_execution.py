@@ -331,6 +331,7 @@ class TestIntegration:
             ("k", "normal"),
             ("!analyze", "analysis"),
             ("lm", "bulk"),
+            (".breakin", "execution"),
             (".reload /f", "extended")
         ]
         
@@ -340,4 +341,4 @@ class TestIntegration:
 
 
 if __name__ == "__main__":
-    pytest.main([__file__]) 
+    pytest.main([__file__])

@@ -64,6 +64,26 @@ public:
      */
     static std::string ExecuteWinDbgCommand(const std::string& command, unsigned int timeoutMs = Constants::DEFAULT_TIMEOUT_MS);
 
+    /**
+     * @brief Get the current DbgEng execution status without executing a command.
+     * @return JSON object describing the debugger runtime state.
+     */
+    static json GetRuntimeStatus();
+
+    /**
+     * @brief Continue the debuggee using DbgEng execution status APIs.
+     * @param status DEBUG_STATUS_GO, DEBUG_STATUS_GO_HANDLED, or DEBUG_STATUS_GO_NOT_HANDLED.
+     * @return JSON object describing the new runtime state.
+     */
+    static json ContinueExecution(ULONG status = DEBUG_STATUS_GO);
+
+    /**
+     * @brief Interrupt a running debuggee and wait until the debugger is broken in.
+     * @param waitMs Maximum time to wait for break-in.
+     * @return JSON object describing the break-in result.
+     */
+    static json BreakIn(unsigned int waitMs = Constants::DEFAULT_TIMEOUT_MS);
+
     // Response creation methods
     
     /**
@@ -258,4 +278,4 @@ private:
      * @brief Initialize session ID if not already set.
      */
     static void EnsureSessionId();
-}; 
+};

@@ -109,7 +109,7 @@ def register_support_tools(mcp: FastMCP):
         if not tool_name:
             # List all available tools
             available_tools = [
-                "debug_session", "run_command", "run_sequence", "breakpoint_and_continue",
+                "debug_session", "runtime_control", "run_command", "run_sequence", "breakpoint_and_continue",
                 "analyze_process", "analyze_thread", "analyze_memory", "analyze_kernel",
                 "connection_manager", "session_manager", 
                 "performance_manager", "async_manager",
@@ -122,18 +122,20 @@ def register_support_tools(mcp: FastMCP):
                 "usage": "Use get_help(tool_name='tool_name') to get help for a specific tool",
                 "examples": [
                     "get_help(tool_name='analyze_process')",
+                    "get_help(tool_name='runtime_control')",
                     "get_help(tool_name='run_command')",
                     "get_help(tool_name='breakpoint_and_continue')",
                     "get_help(tool_name='analyze_process', action='switch')"
                 ],
                 "tool_categories": {
                     "session_management": ["debug_session", "connection_manager", "session_manager"],
-                    "command_execution": ["run_command", "run_sequence", "breakpoint_and_continue"],
+                    "command_execution": ["runtime_control", "run_command", "run_sequence", "breakpoint_and_continue"],
                     "analysis": ["analyze_process", "analyze_thread", "analyze_memory", "analyze_kernel"],
                     "performance": ["performance_manager", "async_manager"],
                     "support": ["troubleshoot", "get_help"]
                 },
                 "automation_features": {
+                    "runtime_control": "Use runtime_control for status, continue, and break-in while a kernel target is running",
                     "execution_control": "✅ Now enabled for LLM automation (g, p, t, gu, wt)",
                     "breakpoint_control": "✅ Now enabled for LLM automation (bp, bc, bd, be, etc.)",
                     "context_switching": "✅ Now enabled for LLM automation (.thread, .process)",
@@ -154,7 +156,7 @@ def register_support_tools(mcp: FastMCP):
                 "error": f"Tool '{tool_name}' not found or no help available",
                 "error_code": "tool_not_found", 
                 "available_tools": [
-                    "debug_session", "run_command", "run_sequence", "breakpoint_and_continue",
+                    "debug_session", "runtime_control", "run_command", "run_sequence", "breakpoint_and_continue",
                     "analyze_process", "analyze_thread", "analyze_memory", "analyze_kernel",
                     "connection_manager", "session_manager",
                     "performance_manager", "async_manager", 
@@ -178,13 +180,28 @@ def register_support_tools(mcp: FastMCP):
         help_info["context"] = context_info
         
         # Add tool-specific tips based on the tool name
-        if tool_name == "run_command":
+        if tool_name == "runtime_control":
+            help_info["usage_examples"] = [
+                "runtime_control(action='status')",
+                "runtime_control(action='continue')",
+                "runtime_control(action='break', wait_ms=15000)"
+            ]
+            help_info["runtime_control_tips"] = [
+                "Use action='status' to detect whether the debugger is running or broken.",
+                "Use action='continue' to run the target.",
+                "Use action='break' to interrupt a running kernel target; avoid repeated .breakin through run_command.",
+                "Normal run_command calls are safe again after runtime_state.is_broken is true."
+            ]
+        elif tool_name == "run_command":
             help_info["performance_tips"] = [
                 "Use resilient=True (default) for unstable VM connections",
                 "Use optimize=True (default) for better caching and performance", 
                 "Commands are automatically categorized for optimal timeouts"
             ]
             help_info["execution_control_tips"] = [
+                "Use runtime_control(action='status') before inspection commands if the target might be running.",
+                "Use runtime_control(action='break') to regain debugger control after continue.",
+                "Do not rely on repeated .breakin calls through run_command while the kernel target is running.",
                 "✅ Execution control commands now enabled for LLM automation:",
                 "  • 'g' - Continue execution",
                 "  • 'p' - Step over (execute one instruction)",

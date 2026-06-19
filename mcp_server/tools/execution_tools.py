@@ -12,7 +12,7 @@ from core.validation import validate_command, is_safe_for_automation
 from core.context import get_context_manager, save_context, restore_context
 from core.error_handler import enhance_error, error_enhancer, DebugContext, ErrorCategory
 from core.hints import get_parameter_help, validate_tool_parameters
-from core.communication import send_command, CommunicationError, TimeoutError, ConnectionError
+from core.communication import send_command, send_handler_command, CommunicationError, TimeoutError, ConnectionError
 from core.execution import get_executor, execute_command as execute_unified
 
 from .tool_utilities import (
@@ -23,6 +23,90 @@ logger = logging.getLogger(__name__)
 
 def register_execution_tools(mcp: FastMCP):
     """Register all command execution tools."""
+
+    @mcp.tool()
+    async def runtime_control(ctx: Context, action: str = "status", wait_ms: int = 15000) -> Dict[str, Any]:
+        """
+        Control target execution state without routing through normal WinDbg command execution.
+
+        Use this for kernel runtime control after continuing the target. Normal commands require
+        the debugger to be broken in; when the target is running, use action="break" instead of
+        sending .breakin through run_command.
+
+        Args:
+            ctx: The MCP context
+            action: Runtime action: "status", "continue", or "break"
+            wait_ms: Maximum wait for action="break" to regain debugger control
+
+        Returns:
+            Runtime state and control result from the WinDbg extension
+        """
+        normalized_action = (action or "status").strip().lower()
+        if normalized_action in {"go"}:
+            normalized_action = "continue"
+        elif normalized_action in {"breakin", "interrupt"}:
+            normalized_action = "break"
+
+        if normalized_action not in {"status", "continue", "break"}:
+            return {
+                "success": False,
+                "error": f"Unknown runtime control action: {action}",
+                "available_actions": ["status", "continue", "break"],
+                "usage": "runtime_control(action='status'|'continue'|'break')"
+            }
+
+        if wait_ms <= 0:
+            return {
+                "success": False,
+                "error": "wait_ms must be greater than zero",
+                "usage": "runtime_control(action='break', wait_ms=15000)"
+            }
+
+        try:
+            timeout_ms = max(wait_ms + 1000, 5000)
+            response = send_handler_command(
+                "runtime_control",
+                timeout_ms=timeout_ms,
+                action=normalized_action,
+                wait_ms=wait_ms
+            )
+
+            success = response.get("status") == "success"
+            runtime_state = response.get("runtime_state", {})
+            result = {
+                "success": success,
+                "action": normalized_action,
+                "runtime_state": runtime_state,
+                "output": response.get("output", ""),
+                "guidance": response.get("guidance")
+            }
+
+            if normalized_action == "status":
+                result["agent_next_steps"] = [
+                    "If is_broken is true, normal run_command calls are safe.",
+                    "If is_running is true, use runtime_control(action='break') before inspection commands."
+                ]
+            elif normalized_action == "continue":
+                result["agent_next_steps"] = [
+                    "Target is running.",
+                    "Use runtime_control(action='status') to check state.",
+                    "Use runtime_control(action='break') to regain debugger control."
+                ]
+            elif normalized_action == "break":
+                result["agent_next_steps"] = [
+                    "If success is true, the debugger is broken in and run_command is safe again.",
+                    "If success is false, inspect runtime_state and retry break with a longer wait_ms."
+                ]
+
+            return result
+
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "action": normalized_action,
+                "guidance": "Use runtime_control(action='break') for kernel break-in; do not rely on repeated .breakin through run_command while the target is running."
+            }
     
     @mcp.tool()
     async def run_command(ctx: Context, action: str = "", command: str = "", validate: bool = True, resilient: bool = True, optimize: bool = True) -> Union[str, Dict[str, Any]]:
@@ -516,4 +600,4 @@ def register_execution_tools(mcp: FastMCP):
             error_dict = enhanced_error.to_dict()
             error_dict["partial_results"] = results
             error_dict["breakpoint"] = breakpoint
-            return error_dict 
+            return error_dict
